@@ -7,11 +7,20 @@ from __future__ import annotations
 
 import html
 import io
+import hmac
+from datetime import datetime, date, time, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+from prediction_tracker import (
+    list_predictions, make_prediction_record, save_prediction, table_for_predictions,
+    same_fixture, UK_ZONE,
+)
+from fixtures import download_fixtures
 
 from football_model import (
     BLEND_ATTACK_WEIGHT,
@@ -33,6 +42,18 @@ from football_model import (
 )
 
 st.set_page_config(page_title="EPL Match Lab | Attack × Defence", page_icon="⚽", layout="wide")
+
+DEFAULT_REPO = "dantakeuchinihs-alt/epl-match-lab"
+
+def secret(name: str, default: str = "") -> str:
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        return default
+
+REPO = secret("GITHUB_REPO", DEFAULT_REPO)
+GITHUB_TOKEN = secret("GITHUB_TOKEN")
+SAVE_PIN = secret("SAVE_PIN")
 
 CSS = """
 <style>
@@ -67,6 +88,15 @@ def cached_shot_model(prepared: pd.DataFrame):
 @st.cache_data(show_spinner="Recomputing historical tests…")
 def cached_brier(matches: pd.DataFrame, prepared: pd.DataFrame):
     return historical_brier(matches, prepared)
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def cached_records(repo: str, token: str):
+    return list_predictions(repo, token)
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def cached_upcoming(clubs_tuple: tuple[str, ...]):
+    return download_fixtures(list(clubs_tuple))
 
 
 def make_score_heatmap(grid: np.ndarray, home: str, away: str):
@@ -170,7 +200,7 @@ if len(clubs) < 2:
 
 st.caption(f"Match data through **{latest_date.isoformat()}** · {len(clubs)} clubs shown from **{season_label(latest_season)}** · Predictions are hypothetical scenarios, not live fixture forecasts.")
 
-tab1, tab2, tab3 = st.tabs(["⚽ Match predictor", "📈 Attack & defence ratings", "🧪 Model evidence"])
+tab1, tab4, tab2, tab3 = st.tabs(["⚽ Match predictor", "📅 Prediction tracker", "📈 Attack & defence ratings", "🧪 Model evidence"])
 
 with tab1:
     st.subheader("Choose your matchup")
@@ -235,6 +265,148 @@ with tab1:
                            file_name="epl_matchlab_prediction.csv", mime="text/csv")
         st.caption("The 25/75 blend was the best *blend weight* tested in Lesson 10 validation, not the best overall validation model. Its results are experimental.")
 
+
+with tab4:
+    st.subheader("Lock a prediction before kickoff")
+    st.write("Choose an upcoming Premier League fixture. Saving creates a timestamped, public GitHub record that will remain available after the app restarts. Results are matched automatically when the historical match feed updates.")
+
+    try:
+        upcoming = cached_upcoming(tuple(clubs))
+    except Exception as exc:
+        upcoming = []
+        st.caption(f"Weekly fixture feed unavailable ({type(exc).__name__}). You can still enter the match date manually; manual dates are not independently verified.")
+
+    choice_options = ["Upcoming fixtures", "Enter a matchup manually"] if upcoming else ["Enter a matchup manually"]
+    choice = st.radio("How would you like to select a match?", choice_options, horizontal=True,
+                      key="tracker_choice")
+
+    if choice == "Upcoming fixtures":
+        selected_index = st.selectbox("Upcoming Premier League fixtures", options=list(range(len(upcoming))),
+                                      format_func=lambda i: upcoming[i]["label"])
+        match = upcoming[selected_index]
+        track_home, track_away = match["home"], match["away"]
+        kickoff_utc = match["kickoff_utc"]
+        fixture_source = match["source"]
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            track_home = st.selectbox("Home club", clubs, index=clubs.index("Arsenal") if "Arsenal" in clubs else 0,
+                                      key="tracker_home")
+        with c2:
+            track_away = st.selectbox("Away club", clubs, index=clubs.index("Chelsea") if "Chelsea" in clubs else min(1,len(clubs)-1),
+                                      key="tracker_away")
+        c3, c4 = st.columns(2)
+        uk_now = datetime.now(UK_ZONE)
+        with c3:
+            kickoff_date = st.date_input("Kickoff date (UK)", value=uk_now.date() + timedelta(days=1),
+                                         min_value=uk_now.date(), max_value=uk_now.date() + timedelta(days=365),
+                                         key="tracker_date")
+        with c4:
+            kickoff_time = st.time_input("Kickoff time (UK)", value=time(15, 0), step=1800, key="tracker_time")
+        kickoff_utc = datetime.combine(kickoff_date, kickoff_time, tzinfo=UK_ZONE).astimezone(timezone.utc)
+        fixture_source = "Manual kickoff (unverified)"
+        st.caption("Manual dates are your own entries, not confirmed fixtures. Double-check the official kickoff time. They are excluded from verified accuracy summaries.")
+
+    valid_match = track_home != track_away and kickoff_utc > datetime.now(timezone.utc)
+    if track_home == track_away:
+        st.warning("Choose two different clubs.")
+    elif kickoff_utc <= datetime.now(timezone.utc):
+        st.warning("This kickoff has passed; only future matches can be saved.")
+    else:
+        local_kickoff = kickoff_utc.astimezone(UK_ZONE)
+        st.caption(f"Kickoff: {local_kickoff.strftime('%A %d %B %Y, %H:%M')} UK · {kickoff_utc.strftime('%Y-%m-%d %H:%M')} UTC")
+        # Conservative pre-match cutoff: exclude ALL results dated on or after
+        # the upcoming fixture's UK calendar date, regardless of what the provider published.
+        pre_matches = matches.loc[matches.Date.dt.date < local_kickoff.date()].copy()
+        if len(pre_matches) < 30:
+            st.warning("Not enough completed historical matches before this fixture.")
+            valid_match = False
+        elif len(matches.loc[(matches.HomeTeam == track_home) & (matches.AwayTeam == track_away) &
+                               (matches.Date.dt.date == local_kickoff.date())]) > 0:
+            st.warning("The provider already lists a completed match for these clubs on the selected day. Saving is blocked.")
+            valid_match = False
+        else:
+            # For tracking we ONLY freeze the preferred Attack × Defence model.
+            # The historical shots regression is deliberately not used here.
+            prepared_before, history_before = cached_features(pre_matches)
+            frozen = prediction_for_match(pre_matches, history_before, None, track_home, track_away)
+            freeze_grid = frozen.distributions["Attack × Defence"]
+            freeze_probs = outcome_probs(freeze_grid)
+            freeze_score, freeze_exact = most_likely_score(freeze_grid)
+            freeze_goals = frozen.goals["Attack × Defence"]
+            a, b, c = st.columns(3)
+            with a:
+                st.metric("Most likely score", freeze_score, help=f"Exact-score probability {100*freeze_exact:.1f}%")
+            with b:
+                st.metric("Home win", f"{freeze_probs[0]*100:.1f}%")
+            with c:
+                st.metric("Draw / Away win", f"{freeze_probs[1]*100:.1f}% / {freeze_probs[2]*100:.1f}%")
+            st.caption(f"Frozen estimates: {track_home} {freeze_goals[0]:.2f} – {freeze_goals[1]:.2f} {track_away} expected goals. "
+                       f"Historical data ends on {pre_matches.Date.max().date()}; results from the fixture day are deliberately excluded.")
+
+    st.markdown("#### Save this prediction")
+    if not GITHUB_TOKEN or not SAVE_PIN:
+        st.info("Saving isn't connected yet. Set GITHUB_TOKEN and SAVE_PIN in Streamlit Community Cloud → App settings → Secrets. You can still preview matches and view public history.")
+    elif not valid_match:
+        st.caption("Choose a valid future fixture to enable saving.")
+    else:
+        with st.form("save_forecast", clear_on_submit=True):
+            entered_pin = st.text_input("Owner save PIN", type="password", help="Only you should know this PIN. Keep it out of GitHub and screenshots.")
+            submitted = st.form_submit_button("🔒 Save prediction permanently", type="primary")
+            if submitted:
+                if not hmac.compare_digest(entered_pin, SAVE_PIN):
+                    st.error("Incorrect save PIN. Nothing was saved.")
+                else:
+                    try:
+                        frozen_record = make_prediction_record(
+                            track_home, track_away, kickoff_utc, fixture_source,
+                            str(pre_matches.Date.max().date()), freeze_grid, freeze_goals,
+                            freeze_score, freeze_exact, freeze_probs)
+                        link = save_prediction(REPO, GITHUB_TOKEN, frozen_record)
+                        cached_records.clear()
+                        st.success("Prediction saved to GitHub! It will appear in the history below.")
+                        st.markdown(f"[View your permanent GitHub prediction record]({link})")
+                    except Exception as exc:
+                        st.error(f"Couldn't save prediction: {exc}")
+    st.caption("Your GitHub repository is public. Saved match predictions and their timestamps will be publicly visible. The secret token and PIN must only be entered in Streamlit Secrets.")
+
+    st.divider()
+    st.subheader("Saved predictions and actual results")
+    if st.button("↻ Refresh prediction history and scores"):
+        cached_records.clear()
+        cached_download.clear()
+        st.rerun()
+    try:
+        existing = cached_records(REPO, GITHUB_TOKEN)
+    except Exception as exc:
+        st.warning(f"Unable to load GitHub prediction history: {exc}")
+        existing = []
+    if not existing:
+        st.info("No saved predictions found yet. After configuring the token and PIN, save your first upcoming match above.")
+    else:
+        records_table = table_for_predictions(existing, matches)
+        if len(records_table) == 0:
+            st.warning("Prediction records were found but couldn't be displayed.")
+        else:
+            status_filter = st.radio("Show", ["All", "Upcoming", "Final", "Awaiting result"], horizontal=True)
+            visible = records_table if status_filter == "All" else records_table.loc[records_table.Status.eq(status_filter)]
+            finals = records_table.loc[(records_table.Status == "Final") &
+                                       (records_table.Source == "Football-Data upcoming fixtures CSV")]
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Saved predictions", len(records_table))
+            m2.metric("Verified finished", len(finals))
+            m3.metric("Average Brier", f"{finals.Brier.mean():.3f}" if len(finals) else "—")
+            if len(finals):
+                st.caption(f"Among verified-feed forecasts: exact score hit rate {100*finals['Exact correct'].mean():.1f}% · "
+                           f"Most probable outcome accuracy {100*finals['Outcome correct'].mean():.1f}% (n={len(finals)}). "
+                           "These are descriptive results, not proof of future accuracy.")
+            st.dataframe(visible, hide_index=True, use_container_width=True,
+                         column_config={"GitHub record":st.column_config.LinkColumn("View record", display_text="Open")})
+            st.download_button("Download prediction history (CSV)",
+                               records_table.to_csv(index=False).encode("utf-8"),
+                               file_name="epl_match_lab_tracked_predictions.csv", mime="text/csv")
+            st.caption("Full-time results are checked against Football-Data's completed matches. Results can lag; if a match is postponed more than three days, it stays 'Awaiting result' for review. Predictions cannot be edited from the app once saved.")
+
 with tab2:
     st.subheader("Compare every club’s attack and defence")
     st.write("Ratings use the same rolling 730-day history and venue-specific smoothing as the score predictor.")
@@ -274,6 +446,6 @@ with tab3:
     - Multiply the league goal average by these two ratings to estimate goals, and reverse the comparison for the away team.
     - A Poisson distribution converts these two goal estimates into exact-score and outcome probabilities.
 
-    **What this version cannot do:** reliably assess player swaps, coaching tactics, injuries, or real-time starting XIs. No betting claims or guarantees. We should save predictions before kickoff and assess genuinely future matches next.
+    **What this version cannot do:** reliably assess player swaps, coaching tactics, injuries, or real-time starting XIs. No betting claims or guarantees. The Prediction tracker tab can save timestamped pre-match forecasts and compare them with subsequently reported final scores.
     """)
     st.caption("Source: Football-Data.co.uk historical Premier League CSVs. Collected match results may have reporting delays. Refresh the dataset when returning to the site.")
