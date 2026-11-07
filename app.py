@@ -18,9 +18,10 @@ import streamlit as st
 
 from prediction_tracker import (
     list_predictions, make_prediction_record, save_prediction, table_for_predictions,
-    same_fixture, UK_ZONE,
+    same_fixture, save_predictions_batch, UK_ZONE,
 )
 from fixtures import download_fixtures
+from gameweek import group_fixture_windows, forecast_window, forecast_table
 
 from football_model import (
     BLEND_ATTACK_WEIGHT,
@@ -142,7 +143,7 @@ def goal_probability_bars(probs: np.ndarray, home: str, away: str):
     return figure
 
 
-st.markdown('<div class="hero-label">Independent football analytics project · Lesson 11</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-label">Independent football analytics project · Gameweek tracker</div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-title">EPL Match <span style="color:#6EE2BD">Lab.</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-subtitle">How does one team’s attack match up against the opponent’s defence? Explore expected goals and score probabilities using real Premier League results.</div>', unsafe_allow_html=True)
 st.write("")
@@ -200,7 +201,7 @@ if len(clubs) < 2:
 
 st.caption(f"Match data through **{latest_date.isoformat()}** · {len(clubs)} clubs shown from **{season_label(latest_season)}** · Predictions are hypothetical scenarios, not live fixture forecasts.")
 
-tab1, tab4, tab2, tab3 = st.tabs(["⚽ Match predictor", "📅 Prediction tracker", "📈 Attack & defence ratings", "🧪 Model evidence"])
+tab1, tab_gw, tab4, tab2, tab3 = st.tabs(["⚽ Match predictor", "🗓️ Gameweek predictions", "📅 Prediction tracker", "📈 Attack & defence ratings", "🧪 Model evidence"])
 
 with tab1:
     st.subheader("Choose your matchup")
@@ -265,6 +266,123 @@ with tab1:
                            file_name="epl_matchlab_prediction.csv", mime="text/csv")
         st.caption("The 25/75 blend was the best *blend weight* tested in Lesson 10 validation, not the best overall validation model. Its results are experimental.")
 
+
+
+with tab_gw:
+    st.subheader("Predict the upcoming matchweek")
+    st.write("Generate predictions for every scheduled Premier League match in an upcoming Friday–Thursday window, then save all unsaved forecasts to your existing prediction history with one confirmation.")
+    st.caption("**Important:** The fixture source has dates and kickoff times, but no official Premier League gameweek numbers. These are **Friday–Thursday calendar windows**, not official Gameweek 1, 2, etc. The source can publish only a partial list of upcoming fixtures.")
+
+    if st.button("↻ Refresh upcoming fixtures", key="gameweek_refresh"):
+        cached_upcoming.clear()
+        st.rerun()
+
+    try:
+        gameweek_upcoming = cached_upcoming(tuple(clubs))
+    except Exception as exc:
+        gameweek_upcoming = []
+        st.warning(f"Upcoming fixture feed is temporarily unavailable: {exc}")
+
+    grouped_windows = group_fixture_windows(gameweek_upcoming)
+    if not grouped_windows:
+        st.info("No upcoming EPL fixtures were found in the provider's published window. Check again later or use **Prediction tracker** to enter an independently checked fixture manually.")
+    else:
+        chosen_window = st.selectbox(
+            "Fixture window (UK dates)",
+            options=list(range(len(grouped_windows))),
+            format_func=lambda i: grouped_windows[i]["label"],
+            key="selected_gameweek_window",
+        )
+        selected_window = grouped_windows[chosen_window]
+        st.caption(f"Fixture feed currently lists {len(selected_window['fixtures'])} match(es) for this window. This is not necessarily the complete round; verify fixture times with the league or clubs.")
+
+        try:
+            saved_history = cached_records(REPO, GITHUB_TOKEN)
+            history_available = True
+        except Exception as exc:
+            saved_history = []
+            history_available = False
+            st.warning(f"Couldn't check your saved history: {exc}. Saving is disabled until history can be checked for duplicates.")
+
+        forecasts, skipped_fixtures = forecast_window(matches, selected_window["fixtures"], saved_history)
+        if skipped_fixtures:
+            with st.expander(f"{len(skipped_fixtures)} fixture(s) not forecast"):
+                for warning in skipped_fixtures:
+                    st.caption(warning)
+
+        if not forecasts:
+            st.info("No eligible future matches remain in this window.")
+        else:
+            prediction_table = forecast_table(forecasts)
+            col_count, col_new, col_saved = st.columns(3)
+            new_forecasts = [item["record"] for item in forecasts if not item["saved"]]
+            col_count.metric("Fixture predictions", len(forecasts))
+            col_new.metric("Not yet saved", len(new_forecasts))
+            col_saved.metric("Previously saved", len(forecasts) - len(new_forecasts))
+            st.dataframe(
+                prediction_table, hide_index=True, use_container_width=True,
+                column_config={"GitHub record": st.column_config.LinkColumn("Saved issue", display_text="Open")},
+            )
+            st.download_button(
+                "Download this fixture window (CSV)",
+                prediction_table.to_csv(index=False).encode("utf-8"),
+                file_name=f"epl_predictions_{selected_window['key']}.csv", mime="text/csv",
+                key="gameweek_csv",
+            )
+            st.caption("Predictions use only results dated **before each fixture's UK calendar day**, and use the preferred Attack × Defence model. A score is not a guarantee.")
+
+            with st.expander("Inspect the attack vs defence reasoning for one match"):
+                option = st.selectbox(
+                    "Fixture", options=list(range(len(forecasts))),
+                    format_func=lambda i: f"{forecasts[i]['record']['home']} vs {forecasts[i]['record']['away']}",
+                    key="gameweek_match_detail",
+                )
+                one = forecasts[option]
+                r = one["record"]
+                st.write(f"**{r['home']} {r['score']} {r['away']}** · {100*r['p_exact']:.1f}% exact-score chance")
+                st.write(f"Expected goals: **{r['expected_home']:.2f}–{r['expected_away']:.2f}**")
+                st.write(f"Home win {100*r['p_home']:.1f}% · Draw {100*r['p_draw']:.1f}% · Away win {100*r['p_away']:.1f}%")
+                st.dataframe(pd.DataFrame([
+                    {"Metric": metric, "Relative rating": round(value, 2)}
+                    for metric, value in one["ratings"].items()
+                ]), hide_index=True, use_container_width=True)
+                st.caption("Attack > 1 means above-average scoring; defensive vulnerability < 1 means fewer goals conceded than the relevant league average.")
+
+            st.markdown("#### Lock all unsaved predictions before kickoff")
+            if not GITHUB_TOKEN or not SAVE_PIN:
+                st.info("To save forecasts, configure GITHUB_TOKEN and SAVE_PIN in your existing Streamlit Secrets. You do not need a new token.")
+            elif not history_available:
+                st.caption("Saving is unavailable until the saved-record check succeeds.")
+            elif not new_forecasts:
+                st.success("All eligible matches from this window already have saved predictions. View them in the Prediction tracker tab.")
+            else:
+                if len(new_forecasts) > 20:
+                    st.warning("To protect against accidental bulk writes, this version saves at most 20 fixtures per operation.")
+                st.write(f"This will create **{min(len(new_forecasts),20)} public GitHub Issue(s)**, one per fixture, with their current probabilities and model-data cutoff. Once saved, the app will not overwrite them.")
+                with st.form("gameweek_save_all", clear_on_submit=True):
+                    gameweek_pin = st.text_input("Your private save PIN", type="password", key="gameweek_pin")
+                    agreed = st.checkbox("I checked the fixture dates and want to lock these predictions", key="gameweek_confirm")
+                    do_save = st.form_submit_button("🔒 Save all unsaved gameweek predictions", type="primary")
+                    if do_save:
+                        if not hmac.compare_digest(gameweek_pin, SAVE_PIN):
+                            st.error("Incorrect PIN. Nothing was saved.")
+                        elif not agreed:
+                            st.warning("Confirm the fixture dates before saving.")
+                        else:
+                            try:
+                                batch = save_predictions_batch(REPO, GITHUB_TOKEN, new_forecasts[:20])
+                                cached_records.clear()
+                                st.success(f"Saved {len(batch['saved'])} prediction(s); skipped {len(batch['skipped'])} already saved.")
+                                for item in batch["saved"]:
+                                    st.markdown(f"- [{item['fixture']}]({item['url']})")
+                                if batch["failed"]:
+                                    st.warning(f"{len(batch['failed'])} prediction(s) could not be saved; you can retry without duplicating successful records.")
+                                    for item in batch["failed"]:
+                                        st.caption(f"{item['fixture']}: {item['error']}")
+                                st.caption("Use the Prediction tracker tab to view these forecasts and their eventual results. Refresh the page to update the 'Saved' column.")
+                            except Exception as exc:
+                                st.error(f"Unable to save the gameweek: {exc}")
+    st.caption("Saving occurs only when you press the button — the app does not automatically predict or submit matches while nobody is using it. GitHub Issue records are public; your PIN and token remain private in Streamlit Secrets.")
 
 with tab4:
     st.subheader("Lock a prediction before kickoff")

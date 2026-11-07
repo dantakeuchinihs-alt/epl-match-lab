@@ -144,7 +144,8 @@ def same_fixture(a: dict, b: dict) -> bool:
         return False
 
 
-def save_prediction(repo: str, token: str, record: dict, session=requests) -> str:
+def save_prediction(repo: str, token: str, record: dict, session=requests,
+                    existing_records: list[dict] | None = None) -> str:
     repo = _validate_repo(repo)
     if not token:
         raise ValueError("No GitHub token configured.")
@@ -153,7 +154,7 @@ def save_prediction(repo: str, token: str, record: dict, session=requests) -> st
     if _utc_dt(record["kickoff_utc"]) <= datetime.now(timezone.utc):
         raise ValueError("Kickoff has already passed. Prediction not saved.")
     # Prevent duplicates based on existing GitHub records. This is a convenience, not a concurrency lock.
-    existing = list_predictions(repo, token=token, session=session)
+    existing = existing_records if existing_records is not None else list_predictions(repo, token=token, session=session)
     if any(same_fixture(x, record) for x in existing):
         raise ValueError("A prediction has already been saved for this fixture. Predictions are locked before kickoff.")
     date_uk = _utc_dt(record["kickoff_utc"]).astimezone(UK_ZONE).strftime("%d %b %Y %H:%M UK")
@@ -237,3 +238,32 @@ def table_for_predictions(records: list[dict], matches: pd.DataFrame, now: datet
         except (KeyError, ValueError, TypeError, OverflowError):
             continue
     return pd.DataFrame(rows)
+
+
+def save_predictions_batch(repo: str, token: str, records: list[dict], session=requests) -> dict:
+    """Save up to 20 verified future forecasts, with one GitHub duplicate check.
+
+    Each forecast is its own immutable GitHub Issue. Partial failures are
+    returned and can safely be retried; already-saved fixtures are skipped.
+    This is not an atomic transaction across several GitHub API calls.
+    """
+    if not records:
+        return {"saved": [], "skipped": [], "failed": []}
+    if len(records) > 20:
+        raise ValueError("A batch may contain at most 20 matches.")
+    if not token:
+        raise ValueError("Configure GITHUB_TOKEN in Streamlit Secrets before saving.")
+    existing = list_predictions(repo, token=token, session=session)
+    result = {"saved": [], "skipped": [], "failed": []}
+    for record in records:
+        label = f"{record.get('home', '?')} vs {record.get('away', '?')}"
+        if any(same_fixture(r, record) for r in existing):
+            result["skipped"].append(label)
+            continue
+        try:
+            url = save_prediction(repo, token, record, session=session, existing_records=existing)
+            result["saved"].append({"fixture": label, "url": url})
+            existing.append(record)  # Prevent duplicates inside this very batch.
+        except Exception as exc:
+            result["failed"].append({"fixture": label, "error": str(exc)})
+    return result

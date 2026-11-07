@@ -1,85 +1,95 @@
-# EPL Match Lab — Lesson 12: Prediction Tracker
+# EPL Match Lab — Gameweek Predictor (Website Update)
 
-This upgrade **keeps the existing Attack × Defence model** and adds a **Prediction tracker** tab to [EPL Match Lab](https://epl-match-lab.streamlit.app/).
+This package **updates your existing website** at https://epl-match-lab.streamlit.app/. It does not create a separate app and **does not replace your working prediction tracker**.
 
-### New features
+## What's new
 
-- Pick an upcoming EPL fixture from Football-Data.co.uk's weekly upcoming-fixtures CSV (when available), or manually enter the scheduled UK kickoff date and time.
-- Preview the preferred model's pre-match expected goals, most likely exact score, and probabilities. On the tracker, **match-day results are excluded** to avoid information leakage.
-- **Lock a prediction before kickoff**. The app saves the full probabilities and the data cutoff as a **timestamped GitHub Issue**, rather than relying on Streamlit's temporary storage.
-- See all stored predictions, actual full-time scores when Football-Data has them, and a per-match Brier score. A summary evaluates provider-scheduled fixtures only; manually entered fixtures are marked unverified and excluded from the headline accuracy summary.
-- Download all saved predictions as a CSV.
+Open the **🗓️ Gameweek predictions** tab to:
 
-**Important:** Results do not update in the background. They are reconciled when you revisit or refresh the site. Football-Data's fixture CSV covers *a short upcoming window*, not necessarily the full season. A postponed match more than 3 days from its scheduled date remains pending for review.
+1. Load upcoming Premier League fixtures from [Football-Data's fixtures CSV](https://www.football-data.co.uk/fixtures.csv).
+2. Pick a **Friday–Thursday UK-date window** and see projected scores, win/draw/loss probabilities, expected goals, and data cutoffs for the listed fixtures.
+3. Inspect how the **Attack × Defence** ratings produced each forecast.
+4. Download the selected window's predictions as CSV.
+5. Enter your existing private `SAVE_PIN`, confirm the fixtures, and **save every unsaved prediction in one action**. Each forecast gets a separate timestamped GitHub Issue.
+6. See saved predictions and compare their results later in the existing **📅 Prediction tracker** tab.
 
-## A. Update your existing GitHub repository
+**Gameweek naming:** The free fixture CSV has kickoff dates/times, **not official Premier League gameweek numbers**. The app groups fixtures into Friday–Thursday periods and labels them *fixture windows*. Cup postponements, midweek games, and partial provider coverage mean these periods may differ from official gameweeks.
 
-Your existing repo is: `dantakeuchinihs-alt/epl-match-lab`.
+**Important:** Nothing is automatically saved in the background. Fixtures and predictions appear when you open the app; **you choose when to lock them before kickoff**. The upcoming fixture feed sometimes covers only the next few matches or weekends, rather than a complete round.
 
-1. Download and unzip `EPL_Match_Lab_Prediction_Tracker_Update.zip`.
-2. Open your GitHub repository's **Code** page and choose **Add file → Upload files**.
-3. Upload these files from the extracted ZIP into the **top level** (not inside an extra folder):
-   - `app.py` — updated app, replacing the existing version
-   - `prediction_tracker.py` — new
-   - `fixtures.py` — new
-   - `README.md` — updated instructions, replaces old
-   - `football_model.py` — unchanged model, safe to overwrite with same version
-   - `requirements.txt` — same dependencies as before
-4. Commit the changes on the `main` branch. If GitHub warns about a duplicate filename, use the repo's file editor to replace it, or GitHub Desktop to push the unzipped files.
-5. Streamlit Community Cloud normally picks up code commits automatically. Reopen your existing site and look for a **Prediction tracker** tab.
+## Upload update to GitHub (beginner steps)
 
-Your existing URL is unchanged. You do **not** need to deploy a second app.
+1. Download `EPL_Match_Lab_Gameweek_Predictor_Update.zip` and **unzip** it.
+2. Go to **https://github.com/dantakeuchinihs-alt/epl-match-lab** and open the **Code** tab.
+3. Choose **Add file → Upload files** (or use GitHub's file editor to overwrite existing files if your browser refuses duplicates).
+4. Upload the following **extracted files at the top level** of the repository:
+   - `app.py` — updated Streamlit app, **replaces** the old `app.py`
+   - `gameweek.py` — **new** file (you must upload this)
+   - `prediction_tracker.py` — updated storage with safe batch saving, replaces old file
+   - `fixtures.py` — same upcoming-fixtures module
+   - `football_model.py` — same prediction model
+   - `requirements.txt` — dependencies, unchanged
+   - `README.md` — new instructions, optional but helpful
+5. Scroll down and click **Commit changes**, committing to branch `main`.
+6. Refresh **https://epl-match-lab.streamlit.app/**. Streamlit Community Cloud should deploy the new code from GitHub automatically. You should see **🗓️ Gameweek predictions** among the tabs.
 
-## B. Enable secure, permanent saving
+**Do not upload the ZIP itself.** Upload the individual extracted files. Keep `app.py` and `gameweek.py` directly at the repository's top level. If the website shows `ModuleNotFoundError: No module named 'gameweek'`, you forgot `gameweek.py` or placed it in a subfolder.
 
-A Streamlit app's local storage is not reliably persistent. The updated app uses **GitHub Issues** for each saved forecast. This is simpler and safer than giving it permission to edit the website code.
+### Do I need to create another GitHub token?
 
-1. In GitHub, ensure the **Issues** feature is enabled for your repo. It is usually enabled automatically (look for the **Issues** tab).
-2. Create a **fine-grained personal access token** at [GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/personal-access-tokens/new).
-   - **Resource owner:** the owner of `epl-match-lab`.
-   - **Repository access:** **Only select repositories** → `epl-match-lab`.
-   - **Repository permissions:** **Issues → Read and write**. Leave Contents read-only; no code-writing permissions are needed.
-   - Set a sensible expiration and regenerate the token when it expires.
-   - Copy the token when GitHub generates it; GitHub may show it only once.
-3. Visit [Streamlit Community Cloud](https://share.streamlit.io/). On your app's ⋯ menu choose **Settings → Secrets**. Alternatively, on the deployed app click **Manage app**, and from there open its app settings.
-4. Paste the following, replacing the placeholders with your actual values:
+**No.** You previously added the secrets in Streamlit; this update reuses the same values:
 
 ```toml
 GITHUB_REPO = "dantakeuchinihs-alt/epl-match-lab"
-GITHUB_TOKEN = "PASTE_YOUR_FINE_GRAINED_GITHUB_TOKEN_HERE"
-SAVE_PIN = "CHOOSE_A_PRIVATE_LONG_RANDOM_PIN_OR_PASSWORD"
+GITHUB_TOKEN = "YOUR_EXISTING_GITHUB_TOKEN"
+SAVE_PIN = "YOUR_EXISTING_PRIVATE_PASSWORD"
 ```
 
-5. Click **Save**. Return to the site and refresh. In the **Prediction tracker** tab, enter your private save PIN when locking a prediction.
+This block is **an example only**. Your real token and PIN must stay in **Streamlit Community Cloud → App settings → Secrets**. Never add a secrets file or token to GitHub. GitHub fine-grained token permission: **Issues: Read and write** for this repository. The repository's **Issues** feature must be enabled. Note that your GitHub Issue predictions are publicly visible because the repository is public.
 
-**NEVER paste your token or PIN into a GitHub file, screenshot, or chat message.** Keep them only in Streamlit's **Secrets** settings. The site is public, so saved prediction Issues will be public too. Visitors can read the history but cannot save through the app without the PIN. The GitHub token is limited to Issues in this repository, rather than permission to change the app code.
+## How to use it before a gameweek
 
-Official references: [Streamlit secrets](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management), [Streamlit app settings](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app/app-settings), [GitHub Issues API](https://docs.github.com/en/rest/issues/issues).
+1. Open your EPL Match Lab website.
+2. In the sidebar click **↻ Refresh downloaded match data** if you want the latest finished results.
+3. Open **🗓️ Gameweek predictions** and click **↻ Refresh upcoming fixtures** to request the latest schedule.
+4. Pick one Friday–Thursday fixture window and inspect its predictions. Verify dates/kickoff times using an official team/league schedule if necessary.
+5. Enter the private save PIN, check the confirmation box, and click **🔒 Save all unsaved gameweek predictions**.
+6. Open **📅 Prediction tracker** to see locked predictions. After games finish, click **↻ Refresh prediction history and scores** to fetch new results and Brier scores.
 
-## C. Save and review your first prediction
+If a previous operation saved 5 of 10 matches before a network failure, you can retry. The app will skip the 5 already recorded and attempt the other 5. Saving is limited to **20 fixtures per click** to prevent accidental bulk writes.
 
-1. Open https://epl-match-lab.streamlit.app/ → **Prediction tracker**.
-2. Select a fixture or enter its UK kickoff date/time manually.
-3. Confirm the most likely score and 1X2 probabilities, then enter your private PIN.
-4. Click **Save prediction permanently** and follow its GitHub record link.
-5. Open the site later; your history will remain in GitHub, even if Streamlit restarts.
-6. Once the final result is available in Football-Data's season results, click **Refresh prediction history and scores** to check the outcome and Brier score.
+## Accuracy and data integrity
 
-**Important statistical distinction:** the displayed before-kickoff model does not use that match's result. Saved probabilities are locked at issue creation. The score comparison happens only afterward. A Brier score is the sum of squared errors for the three win/draw/loss probabilities, with **lower better**.
-
-### Limitations and integrity notes
-
-- Upcoming fixtures from Football-Data's `fixtures.csv` can be unavailable or outdated. Confirm official kickoff times; the manually entered date is not independently verified.
-- The tracker deliberately excludes same-day completed matches from the training history, which means a saved prediction can differ slightly from the ordinary Match Predictor tab.
-- Only full-time Premier League results are automatically reconciled. Correct teams and roughly correct kickoff date are required; postponed games over 3 days stay pending. No live score tracking.
-- For a proper out-of-sample evaluation, save future forecasts **before** kickoffs. Avoid changing the baseline model after reviewing those outcomes, unless you're starting a new versioned experiment.
-- The site does not collect users' personal data beyond public GitHub issue metadata. There is no per-user login; only the owner with the PIN can save through the Streamlit form.
+- Predictions use the **same preferred Attack × Defence model** as your website. No new or untested model has been inserted.
+- Each fixture prediction excludes **all results dated on or after that fixture's UK calendar day**; only past dated results can influence it.
+- GitHub's Issue creation timestamp is the audit record of when a prediction was saved. A forecast cannot count as verified pre-match if the Issue was created at or after kickoff.
+- Predictions are **not retrospectively edited** by the website after they are saved. Result checking occurs in the original tracker tab, using Football-Data's completed-result feed.
+- If a fixture is rescheduled by more than three days, result matching can stay pending. It is not silently paired to another game.
+- The website is **not a real-time match-odds system** and does not account for live injuries, starting XIs or tactical adjustments.
+- Current 2026–27 season is configured in `football_model.py`. For a future 2027–28 season, a further season-code update will be necessary.
 
 ## Files
 
-- `app.py`: updated Streamlit interface including the new tab.
-- `prediction_tracker.py`: GitHub issue storage, locked predictions, result matching, scoring.
-- `fixtures.py`: weekly EPL fixture CSV retrieval and UK timezone conversion.
-- `football_model.py`: unchanged Lesson 10 forecasting method.
-- `requirements.txt`: same existing dependencies.
-- `tests/`: synthetic unit tests for the model and tracker.
+| File | Purpose |
+| --- | --- |
+| `app.py` | Website interface with the new Gameweek predictions tab |
+| `gameweek.py` | Calendar grouping and pre-match batch prediction helpers |
+| `prediction_tracker.py` | GitHub Issue storage, history, result scoring, batch saving |
+| `fixtures.py` | Football-Data upcoming fixtures and UK kickoff conversion |
+| `football_model.py` | Existing Attack × Defence / shots comparison models |
+| `requirements.txt` | Python dependencies |
+| `tests/` | Offline synthetic tests (`pytest`) |
+
+### Troubleshooting
+
+**No fixtures available:** Upcoming feed may be empty, stale, or incomplete. Try **Refresh upcoming fixtures**. The existing tracker still supports manually entered matches.
+
+**Token or permission error:** Confirm `GITHUB_REPO`, `GITHUB_TOKEN`, `SAVE_PIN` in Streamlit Secrets; token must be unexpired and include Issues: Read/write on the repository.
+
+**Missing module:** Upload every `.py` file from this update to the repo root, particularly `gameweek.py` and `prediction_tracker.py`.
+
+**Model data not current:** Click **Refresh downloaded match data**; football-data.co.uk may not have published the latest final scores yet.
+
+**Why aren't results automatically showing?** Results are reconciled when you open or refresh the app; there is no background job running while the app is asleep.
+
+Sources: [Football-Data fixture CSV](https://www.football-data.co.uk/fixtures.csv), [Streamlit deployment updates](https://docs.streamlit.io/deploy/streamlit-community-cloud), [GitHub Issues API](https://docs.github.com/en/rest/issues/issues).
