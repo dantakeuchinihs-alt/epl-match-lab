@@ -8,6 +8,8 @@ from __future__ import annotations
 import html
 import io
 import hmac
+from pathlib import Path
+from PIL import Image
 from datetime import datetime, date, time, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,6 +24,7 @@ from prediction_tracker import (
 )
 from fixtures import download_fixtures
 from gameweek import group_fixture_windows, forecast_window, forecast_table
+from live_scores import download_scoreboard, completed_score_dataframe, recent_scoreboard
 
 from football_model import (
     BLEND_ATTACK_WEIGHT,
@@ -42,7 +45,13 @@ from football_model import (
     season_label,
 )
 
-st.set_page_config(page_title="EPL Match Lab | Attack × Defence", page_icon="⚽", layout="wide")
+APP_DIR = Path(__file__).resolve().parent
+st.set_page_config(
+    page_title="Match Lab | Premier League Analytics",
+    page_icon=Image.open(APP_DIR / "assets" / "favicon.png"),
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 DEFAULT_REPO = "dantakeuchinihs-alt/epl-match-lab"
 
@@ -55,24 +64,11 @@ def secret(name: str, default: str = "") -> str:
 REPO = secret("GITHUB_REPO", DEFAULT_REPO)
 GITHUB_TOKEN = secret("GITHUB_TOKEN")
 SAVE_PIN = secret("SAVE_PIN")
+SCORES_API_TOKEN = secret("FOOTBALL_DATA_API_TOKEN")
 
-CSS = """
-<style>
-  .block-container {padding-top: 2.1rem; max-width: 1160px;}
-  [data-testid="stSidebar"] {border-right: 1px solid #23323B;}
-  .hero-label {font-size: .72rem; font-weight: 750; letter-spacing: .17em; color: #6ee2bd; text-transform: uppercase;}
-  .hero-title {font-size: clamp(2rem, 4.5vw, 3.55rem); font-weight: 800; line-height: 1.08; letter-spacing: -.045em; margin: .65rem 0 .7rem;}
-  .hero-subtitle {color: #A9B8C0; font-size: 1.02rem; line-height: 1.6; max-width: 740px;}
-  .score-panel {background: linear-gradient(140deg,#172A34,#132027); border: 1px solid #31464E; border-radius: 18px; padding: 20px; text-align: center;}
-  .score-label {color: #9AB1BB; font-size: .78rem; letter-spacing:.1em; text-transform: uppercase;}
-  .score-main {font-size: 3.2rem; color: #F4FAF8; font-weight: 850; letter-spacing:-.05em; padding: .35rem 0;}
-  .score-goals {font-size: .87rem; color: #A9C5C3;}
-  .soft-note {border-left: 3px solid #4DD9B0; padding: .65rem 1rem; background:#17322F; border-radius:4px; color:#D5EDE4;}
-  div.stButton > button[kind="primary"] {font-weight:750;}
-  h3 {padding-top: .4rem;}
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
+# A single maintainable stylesheet; football model and data sources are unchanged.
+CSS = (APP_DIR / "assets" / "site.css").read_text(encoding="utf-8")
+st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
 
 @st.cache_data(ttl=6 * 3600, show_spinner="Downloading Premier League results…")
 def cached_download():
@@ -100,23 +96,29 @@ def cached_upcoming(clubs_tuple: tuple[str, ...]):
     return download_fixtures(list(clubs_tuple))
 
 
+@st.cache_data(ttl=5 * 60, show_spinner=False)
+def cached_scores(clubs_tuple: tuple[str, ...], token: str):
+    # External score feed: separate from the historical training dataset.
+    return download_scoreboard(token, list(clubs_tuple))
+
+
 def make_score_heatmap(grid: np.ndarray, home: str, away: str):
     n = 7  # 0–6 goals shown; the full model also includes 7–12
     values = grid[:n, :n] * 100
     figure = go.Figure(data=go.Heatmap(
         z=values,
         x=list(range(n)), y=list(range(n)),
-        colorscale=[[0,"#16242B"],[0.25,"#215E62"],[0.65,"#289D84"],[1,"#5BE8B8"]],
+        colorscale=[[0,"#222722"],[0.25,"#49554A"],[0.65,"#8B9788"],[1,"#C9B38E"]],
         colorbar={"title": "%", "ticksuffix":"%", "thickness": 12},
         hovertemplate=f"{home}: %{{y}} goals<br>{away}: %{{x}} goals<br>Probability: %{{z:.2f}}%<extra></extra>",
         text=np.round(values,1),
         texttemplate="%{text:.1f}",
-        textfont={"size": 11, "color":"#E9FAF2"},
+        textfont={"size": 11, "color":"#F1EEE6"},
     ))
     figure.update_layout(
         xaxis_title=f"{away} goals", yaxis_title=f"{home} goals",
-        plot_bgcolor="#101820", paper_bgcolor="rgba(0,0,0,0)",
-        font={"color":"#CBDBDE", "size": 12},
+        plot_bgcolor="#111412", paper_bgcolor="rgba(0,0,0,0)",
+        font={"color":"#C3C9C0", "size": 12, "family":"DM Sans, Arial, sans-serif"},
         xaxis={"side":"bottom", "dtick":1}, yaxis={"autorange":"reversed", "dtick":1},
         margin={"t": 20, "b": 55, "l": 50, "r": 10},
         height=450,
@@ -126,7 +128,7 @@ def make_score_heatmap(grid: np.ndarray, home: str, away: str):
 
 def goal_probability_bars(probs: np.ndarray, home: str, away: str):
     labels = [f"{home} win", "Draw", f"{away} win"]
-    colors = ["#3DD5A9", "#93A8AF", "#E3A96D"]
+    colors = ["#BBA681", "#7D8A80", "#9FA9A1"]
     figure = go.Figure(go.Bar(
         x=probs * 100, y=labels,
         orientation="h", marker_color=colors,
@@ -136,27 +138,40 @@ def goal_probability_bars(probs: np.ndarray, home: str, away: str):
     figure.update_layout(
         xaxis={"range":[0,105],"ticksuffix":"%", "visible":False},
         yaxis={"autorange":"reversed", "tickfont":{"size":13}},
-        font={"color":"#CFDDE0"}, paper_bgcolor="rgba(0,0,0,0)",
+        font={"color":"#C3C9C0", "family":"DM Sans, Arial, sans-serif"}, paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin={"t":0,"b":0,"l":0,"r":55}, height=175,
     )
     return figure
 
 
-st.markdown('<div class="hero-label">Independent football analytics project · Gameweek tracker</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-title">EPL Match <span style="color:#6EE2BD">Lab.</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">How does one team’s attack match up against the opponent’s defence? Explore expected goals and score probabilities using real Premier League results.</div>', unsafe_allow_html=True)
-st.write("")
+st.markdown("""
+<section class="masthead" aria-label="Match Lab introduction">
+  <div class="brand-row">
+    <span class="brand-kicker">Premier League / Independent analysis</span>
+    <span class="brand-edition">Match Lab — 2026/27</span>
+  </div>
+  <div class="hero-title">Match <em>Lab.</em></div>
+  <div class="hero-subrow">
+    <p class="hero-subtitle">Premier League match forecasts, attack and defence analysis, and predictions checked against the final score.</p>
+    <span class="hero-metadata">Pre-match analysis / Not live odds</span>
+  </div>
+</section>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### ⚙️ Match Lab")
+    st.markdown('''<div class="sidebar-logo"><div class="sidebar-wordmark">Match <i>Lab.</i></div><div class="sidebar-subline">Premier League analysis</div></div>''', unsafe_allow_html=True)
+    st.markdown("### Data controls")
     uploaded = st.file_uploader(
         "Optional: upload Football-Data match CSV files instead of downloading",
         type="csv", accept_multiple_files=True,
         help="CSV files must contain Date, HomeTeam, AwayTeam, FTHG and FTAG. Upload multiple seasons for comparisons.",
     )
-    if st.button("↻ Refresh downloaded match data", use_container_width=True):
+    if st.button("Refresh historical data", use_container_width=True):
         cached_download.clear()
+        st.rerun()
+    if st.button("Refresh match scores", use_container_width=True):
+        cached_scores.clear()
         st.rerun()
 
 try:
@@ -181,30 +196,52 @@ if len(matches) < 30:
 clubs, latest_season = latest_clubs(matches)
 latest_date = matches.Date.max().date()
 
+# The scores feed may be fresher than the model's historical training feed.
+# Never silently add those goals to the model: that would change its validated specification.
+provider_scores = None
+provider_finals = None
+provider_problem = None
+if SCORES_API_TOKEN:
+    try:
+        provider_scores = cached_scores(tuple(clubs), SCORES_API_TOKEN)
+        provider_finals = completed_score_dataframe(provider_scores)
+    except Exception as exc:
+        provider_problem = str(exc)
+
 with st.sidebar:
-    st.markdown("### 📊 Data status")
+    st.markdown("### Historical data")
     st.write(f"**Source:** {source_name}")
     st.write(f"**Completed results:** {len(matches):,}")
     st.write(f"**Latest match:** {latest_date.isoformat()}")
     st.write(f"**Latest season in data:** {season_label(latest_season)}")
+    st.caption("These historical statistics power the prediction model. They may update slower than match results.")
+    st.markdown("### Match results feed")
+    if provider_scores is None:
+        st.caption("Not connected" if not SCORES_API_TOKEN else f"Unavailable: {provider_problem}")
+    else:
+        completed = provider_scores.loc[provider_scores.is_finished]
+        st.write(f"**Confirmed score records:** {len(completed)}")
+        if len(completed):
+            st.write(f"**Latest final:** {completed.kickoff_utc.max().astimezone(UK_ZONE).strftime('%d %b %Y')} (UK)")
+        st.caption("Separate football-data.org API; free-plan scores can be delayed.")
     if fetch_warnings:
         with st.expander(f"{len(fetch_warnings)} season download warnings"):
             for warning in fetch_warnings:
                 st.caption(warning)
     st.divider()
-    st.caption("Model scope: full-time Premier League scores only. Not live, and no player, injury, formation or lineup inputs.")
+    st.caption("Prediction model uses historical full-time results, not in-play data, player availability or formations.")
     st.caption("Historical results contain outcomes, not pre-match betting information.")
 
 if len(clubs) < 2:
     st.error("Need at least two different clubs in the latest uploaded season.")
     st.stop()
 
-st.caption(f"Match data through **{latest_date.isoformat()}** · {len(clubs)} clubs shown from **{season_label(latest_season)}** · Predictions are hypothetical scenarios, not live fixture forecasts.")
+st.caption(f"HISTORICAL DATA TO {latest_date.isoformat()}   /   {len(clubs)} CLUBS   /   {season_label(latest_season)}   /   HYPOTHETICAL PREDICTIONS")
 
-tab1, tab_gw, tab4, tab2, tab3 = st.tabs(["⚽ Match predictor", "🗓️ Gameweek predictions", "📅 Prediction tracker", "📈 Attack & defence ratings", "🧪 Model evidence"])
+tab1, tab_scores, tab_gw, tab4, tab2, tab3 = st.tabs(["Predict", "Scores", "Fixtures", "Tracker", "Team ratings", "Method"])
 
 with tab1:
-    st.subheader("Choose your matchup")
+    st.subheader("Match forecast")
     col_h, col_a = st.columns(2)
     h_index = clubs.index("Arsenal") if "Arsenal" in clubs else 0
     a_index = clubs.index("Chelsea") if "Chelsea" in clubs else (1 if h_index == 0 else 0)
@@ -230,14 +267,29 @@ with tab1:
         probs = outcome_probs(grid)
         score, score_prob = most_likely_score(grid)
         goals = pred.goals["Attack × Defence"]
-        st.markdown("#### Preferred model · Attack × Defence")
+        st.markdown("#### Preferred model — Attack × Defence")
         safe_home = html.escape(home)
         safe_away = html.escape(away)
+        # The large editorial scoreline stays purely presentational. The
+        # probabilities and the underlying predictive model are unchanged.
+        score_parts = score.replace("—", "–").replace("-", "–").split("–")
+        score_home = html.escape(score_parts[0].strip())
+        score_away = html.escape(score_parts[1].strip())
         st.markdown(f"""
         <div class="score-panel">
-          <div class="score-label">Most likely exact score · {score_prob*100:.1f}% probability</div>
-          <div class="score-main">{safe_home} &nbsp; {score} &nbsp; {safe_away}</div>
-          <div class="score-goals">Estimated goals &nbsp; {goals[0]:.2f} — {goals[1]:.2f}</div>
+          <div class="score-panel-top">
+            <span class="score-label">Projected score / Attack × Defence</span>
+            <span class="score-prob">{score_prob*100:.1f}% probability of this exact result</span>
+          </div>
+          <div class="score-line">
+            <div class="score-club">{safe_home}<small>Home</small></div>
+            <div class="score-numbers">{score_home}<span>:</span>{score_away}</div>
+            <div class="score-club">{safe_away}<small>Away</small></div>
+          </div>
+          <div class="score-bottom">
+            <span class="score-goals">Expected goals &nbsp; {goals[0]:.2f} – {goals[1]:.2f}</span>
+            <span class="score-method">Based on historical match data</span>
+          </div>
         </div>""", unsafe_allow_html=True)
         st.plotly_chart(goal_probability_bars(probs, home, away), use_container_width=True, config={"displayModeBar":False})
         st.caption("The most likely exact score may have a low probability even when one team is favoured to win overall.")
@@ -268,12 +320,55 @@ with tab1:
 
 
 
+@st.fragment(run_every="5m")
+def display_scores():
+    st.subheader("Scores and results")
+    st.write("Scores are retrieved from a separate football-data.org feed, so they can appear before the historical CSV updates. Final results can automatically settle your saved predictions when you open or refresh the tracker.")
+    st.caption("The provider's free tier **delays scores**. This is not guaranteed real-time coverage. In-progress scores are never counted as final results.")
+    st.caption("Football data provided by the Football-Data.org API.")
+    if not SCORES_API_TOKEN:
+        st.info("To enable the scores feed, create a football-data.org API key and add `FOOTBALL_DATA_API_TOKEN` to Streamlit Secrets. Your existing GitHub token and save PIN stay unchanged.")
+        st.markdown("[Create a scores API account](https://www.football-data.org/client/register)")
+        return
+    if st.button("Check for newer scores", key="scores_tab_refresh"):
+        cached_scores.clear()
+    try:
+        scoreboard = cached_scores(tuple(clubs), SCORES_API_TOKEN)
+    except Exception as exc:
+        st.error(f"Couldn't retrieve the scores feed: {exc}")
+        st.caption("Historical predictions and your saved records are still available. The scores feed is optional.")
+        return
+    if scoreboard.empty:
+        st.warning("The scores provider returned no Premier League matches.")
+        return
+    fetched = scoreboard.fetched_at_utc.iloc[0]
+    confirmed = scoreboard.loc[scoreboard.is_finished]
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Matches in provider feed", len(scoreboard))
+    s2.metric("Confirmed finals", len(confirmed))
+    s3.metric("Newest final (UK)", confirmed.kickoff_utc.max().astimezone(UK_ZONE).strftime("%d %b") if len(confirmed) else "—")
+    st.caption(f"Retrieved from football-data.org at {fetched.strftime('%d %b %Y %H:%M')} UTC. "
+               "Auto-checks about every five minutes while this app session is active, and when you press refresh. Actual update speed depends on the provider.")
+    recent = recent_scoreboard(scoreboard)
+    if recent.empty:
+        st.info("No matches in the recent/coming 8-day / 7-day window.")
+    else:
+        st.dataframe(recent, hide_index=True, use_container_width=True)
+    unmapped = scoreboard.loc[scoreboard.is_finished & (scoreboard.mapped_home.isna() | scoreboard.mapped_away.isna())]
+    if len(unmapped):
+        st.caption(f"{len(unmapped)} confirmed result(s) have names not yet matched to the model's club list; they are shown here but not used to settle saved predictions.")
+
+with tab_scores:
+    display_scores()
+
+
+
 with tab_gw:
-    st.subheader("Predict the upcoming matchweek")
+    st.subheader("Upcoming fixtures")
     st.write("Generate predictions for every scheduled Premier League match in an upcoming Friday–Thursday window, then save all unsaved forecasts to your existing prediction history with one confirmation.")
     st.caption("**Important:** The fixture source has dates and kickoff times, but no official Premier League gameweek numbers. These are **Friday–Thursday calendar windows**, not official Gameweek 1, 2, etc. The source can publish only a partial list of upcoming fixtures.")
 
-    if st.button("↻ Refresh upcoming fixtures", key="gameweek_refresh"):
+    if st.button("Refresh upcoming fixtures", key="gameweek_refresh"):
         cached_upcoming.clear()
         st.rerun()
 
@@ -362,7 +457,7 @@ with tab_gw:
                 with st.form("gameweek_save_all", clear_on_submit=True):
                     gameweek_pin = st.text_input("Your private save PIN", type="password", key="gameweek_pin")
                     agreed = st.checkbox("I checked the fixture dates and want to lock these predictions", key="gameweek_confirm")
-                    do_save = st.form_submit_button("🔒 Save all unsaved gameweek predictions", type="primary")
+                    do_save = st.form_submit_button("Save gameweek predictions", type="primary")
                     if do_save:
                         if not hmac.compare_digest(gameweek_pin, SAVE_PIN):
                             st.error("Incorrect PIN. Nothing was saved.")
@@ -385,8 +480,8 @@ with tab_gw:
     st.caption("Saving occurs only when you press the button — the app does not automatically predict or submit matches while nobody is using it. GitHub Issue records are public; your PIN and token remain private in Streamlit Secrets.")
 
 with tab4:
-    st.subheader("Lock a prediction before kickoff")
-    st.write("Choose an upcoming Premier League fixture. Saving creates a timestamped, public GitHub record that will remain available after the app restarts. Results are matched automatically when the historical match feed updates.")
+    st.subheader("Save a pre-match prediction")
+    st.write("Choose an upcoming Premier League fixture. Saving creates a timestamped public GitHub record. When a finished match is available from the scores feed, the tracker can show the result before the historical CSV updates.")
 
     try:
         upcoming = cached_upcoming(tuple(clubs))
@@ -470,7 +565,7 @@ with tab4:
     else:
         with st.form("save_forecast", clear_on_submit=True):
             entered_pin = st.text_input("Owner save PIN", type="password", help="Only you should know this PIN. Keep it out of GitHub and screenshots.")
-            submitted = st.form_submit_button("🔒 Save prediction permanently", type="primary")
+            submitted = st.form_submit_button("Save prediction", type="primary")
             if submitted:
                 if not hmac.compare_digest(entered_pin, SAVE_PIN):
                     st.error("Incorrect save PIN. Nothing was saved.")
@@ -490,9 +585,10 @@ with tab4:
 
     st.divider()
     st.subheader("Saved predictions and actual results")
-    if st.button("↻ Refresh prediction history and scores"):
+    if st.button("Refresh history and results"):
         cached_records.clear()
         cached_download.clear()
+        cached_scores.clear()
         st.rerun()
     try:
         existing = cached_records(REPO, GITHUB_TOKEN)
@@ -502,7 +598,7 @@ with tab4:
     if not existing:
         st.info("No saved predictions found yet. After configuring the token and PIN, save your first upcoming match above.")
     else:
-        records_table = table_for_predictions(existing, matches)
+        records_table = table_for_predictions(existing, matches, provider_finals=provider_finals)
         if len(records_table) == 0:
             st.warning("Prediction records were found but couldn't be displayed.")
         else:
@@ -523,10 +619,10 @@ with tab4:
             st.download_button("Download prediction history (CSV)",
                                records_table.to_csv(index=False).encode("utf-8"),
                                file_name="epl_match_lab_tracked_predictions.csv", mime="text/csv")
-            st.caption("Full-time results are checked against Football-Data's completed matches. Results can lag; if a match is postponed more than three days, it stays 'Awaiting result' for review. Predictions cannot be edited from the app once saved.")
+            st.caption("Finished results are checked first against football-data.org (if configured), then against Football-Data.co.uk's historical results. A provider score is only accepted after it is marked FINISHED. Results may be delayed; matches rescheduled by more than three days require manual review. Predictions stay locked.")
 
 with tab2:
-    st.subheader("Compare every club’s attack and defence")
+    st.subheader("Team ratings")
     st.write("Ratings use the same rolling 730-day history and venue-specific smoothing as the score predictor.")
     ranking = club_ratings(matches, clubs)
     chosen_sort = st.selectbox("Sort ratings by", [
@@ -544,7 +640,7 @@ with tab2:
     st.info("These are relative goal-scoring / conceding ratings, not separate measures of true underlying player quality or tactical ability. Recently promoted clubs may have little recent EPL history and are smoothed toward league averages.")
 
 with tab3:
-    st.subheader("How reliable are the predictions?")
+    st.subheader("Model evaluation")
     st.write("We previously evaluated these model specifications on 2024–25 and 2025–26. Lower **Brier scores** mean more accurate win/draw/loss probabilities. These seasons have already influenced our project decisions and are **not fresh independent tests**.")
     if st.button("Calculate historical Brier scores", type="primary"):
         st.session_state["show_brier"] = True

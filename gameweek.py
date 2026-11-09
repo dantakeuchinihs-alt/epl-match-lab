@@ -118,7 +118,7 @@ def forecast_table(items: list[dict]) -> pd.DataFrame:
             "Away win %": round(100 * record["p_away"], 1),
             "Home expected goals": round(record["expected_home"], 2),
             "Away expected goals": round(record["expected_away"], 2),
-            "Saved": "✓ Saved" if item["saved"] else "Not saved",
+            "Saved": "Saved" if item["saved"] else "Not saved",
             "Data through": record["data_cutoff_utc_date"],
             "GitHub record": item["issue_url"],
         })

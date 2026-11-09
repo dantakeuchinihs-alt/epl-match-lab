@@ -203,14 +203,26 @@ def find_result(record: dict, matches: pd.DataFrame) -> dict | None:
             "brier":brier, "match_date":match.Date.date().isoformat()}
 
 
-def table_for_predictions(records: list[dict], matches: pd.DataFrame, now: datetime | None = None) -> pd.DataFrame:
+def table_for_predictions(records: list[dict], matches: pd.DataFrame, now: datetime | None = None,
+                          provider_finals: pd.DataFrame | None = None) -> pd.DataFrame:
     now = now or datetime.now(timezone.utc)
     rows = []
     for record in records:
         try:
             kickoff = _utc_dt(record["kickoff_utc"])
             created = _utc_dt(record["github_created_at_utc"])
-            outcome = find_result(record, matches)
+            # Prefer fresher confirmed provider scores, falling back to the historical CSV.
+            # Do not use in-progress scores to settle a prediction.
+            outcome = None
+            result_source = None
+            if provider_finals is not None and not provider_finals.empty:
+                outcome = find_result(record, provider_finals)
+                if outcome is not None:
+                    result_source = "football-data.org (confirmed final)"
+            if outcome is None:
+                outcome = find_result(record, matches)
+                if outcome is not None:
+                    result_source = "Football-Data.co.uk historical CSV"
             if created >= kickoff:
                 status = "Not verified pre-match"
             elif outcome:
@@ -229,6 +241,7 @@ def table_for_predictions(records: list[dict], matches: pd.DataFrame, now: datet
                 "Away win %":round(float(record["p_away"])*100, 1),
                 "Status":status,
                 "Actual score":outcome["result"] if outcome else "—",
+                "Result source": result_source or "Pending",
                 "Brier":round(outcome["brier"], 4) if outcome else np.nan,
                 "Exact correct":outcome["correct_exact_score"] if outcome else None,
                 "Outcome correct":outcome["correct_outcome"] if outcome else None,
