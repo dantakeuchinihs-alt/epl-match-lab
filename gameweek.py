@@ -12,7 +12,7 @@ from collections import defaultdict
 import pandas as pd
 
 from football_model import (
-    HISTORY_DAYS, attack_defence_rating, most_likely_score,
+    last_two_seasons, recent_season_codes, attack_defence_rating, most_likely_score,
     outcome_probs, poisson_grid,
 )
 from prediction_tracker import make_prediction_record, same_fixture
@@ -69,8 +69,7 @@ def forecast_fixture(matches: pd.DataFrame, fixture: dict,
     if not finished_same_day.empty:
         raise ValueError("The results dataset already contains this fixture on its scheduled date.")
 
-    earliest = pd.Timestamp(uk_day - timedelta(days=HISTORY_DAYS))
-    historical = dated.loc[dated.Date.ge(earliest)]
+    historical = last_two_seasons(dated)
     goals, ratings = attack_defence_rating(historical, home, away)
     grid = poisson_grid(*goals)
     probs = outcome_probs(grid)
@@ -80,6 +79,9 @@ def forecast_fixture(matches: pd.DataFrame, fixture: dict,
         home, away, kickoff, fixture["source"], cutoff,
         grid, goals, score, exact, probs,
     )
+    # Optional metadata; old GitHub Issue predictions remain compatible and locked.
+    record["model_version"] = "attack-defence-two-season-v2"
+    record["training_seasons"] = recent_season_codes(historical)
     return {"record": record, "ratings": ratings}
 
 

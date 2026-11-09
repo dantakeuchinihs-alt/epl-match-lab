@@ -1,0 +1,60 @@
+EPL MATCH LAB — TWO-SEASON MODEL UPDATE
+========================================
+
+What changes
+------------
+The prediction model and Team ratings now use the two most recent Premier
+League seasons that contain COMPLETED MATCHES in the Football-Data dataset.
+As of November 2026, those should normally be 2025–26 and 2026–27.
+
+* Attack × Defence: only those seasons are used to calculate league averages,
+  home/away attack, and home/away defensive vulnerability. All appearances
+  in those seasons are included (previous 20-venue-game cap removed).
+* Recent goals + shots: retrained on those two seasons only. Its form features
+  use the latest five matches available within this two-season dataset.
+* Blend: combines the two newly computed predictions, as before.
+* Gameweek forecasts and manually saved predictions: use the two seasons
+  available BEFORE the particular fixture day. No results from the match
+  day or future fixtures are used.
+* Team ratings: same two-season sample and smoothing as the preferred model.
+* Historical model testing: older records are retained, but only for
+  retrospective tests. Test-time attack ratings use prior matches from no more
+  than two seasons; the shots model is fitted to two pre-test seasons.
+* New seasons: the data loader can try next season's file automatically.
+* New saved GitHub predictions include a nonbreaking model_version and
+  training_seasons field. Previously saved predictions remain unchanged.
+
+Why smoothing remains
+---------------------
+A promoted team may have very few Premier League matches. To avoid extreme
+ratings, a seven-match league-average prior still pulls small samples toward
+1.00. This is not an extra season of club data.
+
+Important
+---------
+The prediction probabilities, team rankings, and retrospective Brier scores
+will change. Earlier Brier scores are NOT evidence that this revised model is
+better. Save future predictions and compare them against actual results.
+The separate final-score API may be fresher than the historical results file;
+only completed matches from the HISTORICAL provider enter the model.
+
+Install in your existing EPL repository
+---------------------------------------
+1. Unzip the update.
+2. Open https://github.com/dantakeuchinihs-alt/epl-match-lab
+3. Choose Add file > Upload files.
+4. Upload exactly these three files at the ROOT of the existing repository:
+   - app.py
+   - football_model.py
+   - gameweek.py
+   (Replace their previous versions.)
+5. Commit changes on main. Streamlit should redeploy automatically.
+6. Reopen https://epl-match-lab.streamlit.app/ and check the sidebar for
+   'Model seasons: 2025–26, 2026–27' (or the two actually available seasons).
+7. Check the Team ratings, Predict, and Fixtures tabs. No changes to Secrets,
+   saved GitHub issues, tracker API keys, design assets, or scores feed.
+
+DO NOT upload this ZIP file itself to GitHub. Extract it first.
+
+Local verification: 32 automated tests passed, including leakage checks and
+new explicit two-season tests. The live Streamlit deployment has not been tested.

@@ -36,6 +36,8 @@ from football_model import (
     fit_shots_model,
     historical_brier,
     latest_clubs,
+    last_two_seasons,
+    recent_season_codes,
     model_training_data,
     most_likely_score,
     outcome_probs,
@@ -373,7 +375,9 @@ with st.sidebar:
     st.write(f"**Completed results:** {len(matches):,}")
     st.write(f"**Latest match:** {latest_date.isoformat()}")
     st.write(f"**Latest season in data:** {season_label(latest_season)}")
-    st.caption("These historical statistics power the prediction model. They may update slower than match results.")
+    window_names = ", ".join(season_label(code) for code in recent_season_codes(matches))
+    st.write(f"**Model seasons:** {window_names}")
+    st.caption("Current ratings and models use only completed matches from these two seasons; older results remain for retrospective evaluation. Historical scores can lag the results feed.")
     st.markdown("### Match results feed")
     if provider_scores is None:
         st.caption("Not connected" if not SCORES_API_TOKEN else f"Unavailable: {provider_problem}")
@@ -388,7 +392,7 @@ with st.sidebar:
             for warning in fetch_warnings:
                 st.caption(warning)
     st.divider()
-    st.caption("Prediction model uses historical full-time results, not in-play data, player availability or formations.")
+    st.caption("Current prediction models use the latest two seasons of completed historical results, not in-play data, player availability or formations.")
     st.caption("Historical results contain outcomes, not pre-match betting information.")
 
 if len(clubs) < 2:
@@ -411,7 +415,8 @@ with tab1:
     if home == away:
         st.warning("Choose different home and away teams.")
     else:
-        prepared, history = cached_features(matches)
+        model_matches = last_two_seasons(matches)
+        prepared, history = cached_features(model_matches)
         shot_model = None
         if len(model_training_data(prepared)) >= 100:
             try:
@@ -419,8 +424,8 @@ with tab1:
             except Exception as exc:
                 st.warning(f"Shots comparison currently unavailable: {exc}")
         else:
-            st.info("Upload more historical seasons to enable the recent-goals-and-shots comparison model.")
-        pred = prediction_for_match(matches, history, shot_model, home, away)
+            st.info("At least 100 completed matches from the two most recent seasons are needed to train the recent-goals-and-shots model.")
+        pred = prediction_for_match(model_matches, history, shot_model, home, away)
         rows = results_for_prediction(pred)
         grid = pred.distributions["Attack × Defence"]
         probs = outcome_probs(grid)
@@ -451,7 +456,7 @@ with tab1:
           </div>
         </div>""", unsafe_allow_html=True)
         st.plotly_chart(goal_probability_bars(probs, home, away), use_container_width=True, config={"displayModeBar":False})
-        st.caption("The most likely exact score may have a low probability even when one team is favoured to win overall.")
+        st.caption("The most likely exact score may have a low probability even when one team is favoured to win overall. All models use the latest two available seasons of completed matches.")
 
         col_l, col_r = st.columns([1, 1.04], gap="large")
         with col_l:
@@ -700,8 +705,9 @@ with tab4:
         else:
             # For tracking we ONLY freeze the preferred Attack × Defence model.
             # The historical shots regression is deliberately not used here.
-            prepared_before, history_before = cached_features(pre_matches)
-            frozen = prediction_for_match(pre_matches, history_before, None, track_home, track_away)
+            model_before = last_two_seasons(pre_matches)
+            prepared_before, history_before = cached_features(model_before)
+            frozen = prediction_for_match(model_before, history_before, None, track_home, track_away)
             freeze_grid = frozen.distributions["Attack × Defence"]
             freeze_probs = outcome_probs(freeze_grid)
             freeze_score, freeze_exact = most_likely_score(freeze_grid)
@@ -734,6 +740,8 @@ with tab4:
                             track_home, track_away, kickoff_utc, fixture_source,
                             str(pre_matches.Date.max().date()), freeze_grid, freeze_goals,
                             freeze_score, freeze_exact, freeze_probs)
+                        frozen_record["model_version"] = "attack-defence-two-season-v2"
+                        frozen_record["training_seasons"] = recent_season_codes(model_before)
                         link = save_prediction(REPO, GITHUB_TOKEN, frozen_record)
                         cached_records.clear()
                         st.success("Prediction saved to GitHub! It will appear in the history below.")
@@ -782,7 +790,10 @@ with tab4:
 
 with tab2:
     st.subheader("Team ratings")
-    st.write("Ratings use the same rolling 730-day history and venue-specific smoothing as the score predictor.")
+    profile_codes = recent_season_codes(matches)
+    st.write("Ratings use completed Premier League matches from **the latest two seasons only**: "
+             + " and ".join(season_label(code) for code in profile_codes)
+             + ". Each home/away appearance in these seasons contributes, with seven league-average prior games for stability.")
     ranking = club_ratings(matches, clubs)
     chosen_sort = st.selectbox("Sort ratings by", [
         "Home attack", "Away attack", "Home defence vulnerability", "Away defence vulnerability"
@@ -800,7 +811,7 @@ with tab2:
 
 with tab3:
     st.subheader("Model evaluation")
-    st.write("We previously evaluated these model specifications on 2024–25 and 2025–26. Lower **Brier scores** mean more accurate win/draw/loss probabilities. These seasons have already influenced our project decisions and are **not fresh independent tests**.")
+    st.write("These recalculated models use a **two-season training window**. We evaluate them retrospectively on 2024–25 and 2025–26. Lower **Brier scores** mean more accurate win/draw/loss probabilities. These seasons have already influenced our project decisions and are **not fresh independent tests**. The scores may differ from previous versions because the models have changed.")
     if st.button("Calculate historical Brier scores", type="primary"):
         st.session_state["show_brier"] = True
     if st.session_state.get("show_brier", False):
@@ -810,7 +821,7 @@ with tab3:
             st.dataframe(historical.pivot(index="Model",columns="Season",values="Brier"), use_container_width=True)
             st.caption("Identical fixtures and pre-match data cutoff for each model. A historical advantage doesn't guarantee future accuracy.")
         except Exception as exc:
-            st.warning(f"Backtest unavailable: {exc}. Upload all historical seasons from 2018–19 to 2025–26.")
+            st.warning(f"Backtest unavailable: {exc}. Upload enough completed historical seasons before 2024–25 and 2025–26.")
     st.markdown("""
     **How Attack × Defence works**
 

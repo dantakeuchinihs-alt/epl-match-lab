@@ -6,6 +6,7 @@ No target match result or in-match stats are used to predict that match.
 from __future__ import annotations
 
 import io
+from datetime import date
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -20,8 +21,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 SEASONS = ["1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526", "2627"]
 MAX_GOALS = 12
-HISTORY_DAYS = 730
-VENUE_GAMES = 20
+SEASON_WINDOW = 2  # Two most recent seasons that have completed match results
 VENUE_PRIOR_GAMES = 7
 WINDOW = 5
 FEATURE_PRIOR_GAMES = 3
@@ -77,11 +77,21 @@ def combine_seasons(parts: list[pd.DataFrame]) -> pd.DataFrame:
     return matches.sort_values(["Date", "HomeTeam", "AwayTeam"]).reset_index(drop=True)
 
 
+def download_season_codes(asof: date | None = None) -> list[str]:
+    """Keep historical backtest seasons and include new EPL seasons automatically."""
+    today = asof or date.today()
+    latest_start_year = today.year if today.month >= 7 else today.year - 1
+    codes = list(SEASONS)
+    for year in range(2027, latest_start_year + 1):
+        codes.append(f"{year % 100:02d}{(year + 1) % 100:02d}")
+    return codes
+
+
 def download_matches() -> tuple[pd.DataFrame, list[str]]:
     """Download real completed EPL fixtures. Network requests are cached by the UI."""
     parts: list[pd.DataFrame] = []
     warnings: list[str] = []
-    for code in SEASONS:
+    for code in download_season_codes():
         url = f"https://www.football-data.co.uk/mmz4281/{code}/E0.csv"
         try:
             response = requests.get(url, timeout=18, headers={"User-Agent": "Mozilla/5.0"})
@@ -96,20 +106,48 @@ def download_matches() -> tuple[pd.DataFrame, list[str]]:
     return combine_seasons(parts), warnings
 
 
+def recent_season_codes(matches: pd.DataFrame, n: int = SEASON_WINDOW) -> list[str]:
+    """Most recent n seasons represented by completed matches (not calendar days).
+
+    Works at any historical date: when passed ONLY games before kickoff, it
+    cannot pick a season that has yet to start. Missing seasons are not filled
+    from a future calendar or a hard-coded 2026–27 assumption.
+    """
+    if matches.empty:
+        return []
+    codes = set(matches["SeasonCode"].dropna().astype(str))
+    return sorted(codes, key=lambda c: (int(c[:2]), c))[-n:]
+
+
+def last_two_seasons(matches: pd.DataFrame) -> pd.DataFrame:
+    """Filter to latest two seasons without changing the chronological order."""
+    if matches.empty:
+        return matches.copy()
+    codes = recent_season_codes(matches)
+    return matches.loc[matches["SeasonCode"].astype(str).isin(codes)].copy()
+
+
 def smooth_mean(values: pd.Series, league_mean: float, k: int = VENUE_PRIOR_GAMES) -> float:
     a = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
     return float((a.sum() + k * league_mean) / (len(a) + k))
 
 
 def attack_defence_rating(past: pd.DataFrame, home: str, away: str):
-    """Exactly the venue-specific 20-game, 7-game-prior model of Lesson 10."""
+    """Venue-specific Attack × Defence using ONLY the two most recent seasons.
+
+    Every completed match from those seasons contributes to the two venue
+    samples. A seven-match league-average prior stabilises sparse samples,
+    especially newly promoted clubs. Past must already exclude match day and
+    future fixtures; the additional season filter is defensive protection.
+    """
+    past = last_two_seasons(past)
     if len(past):
         lg_home = max(float(past["FTHG"].mean()), 0.5)
         lg_away = max(float(past["FTAG"].mean()), 0.5)
     else:
         lg_home, lg_away = 1.5, 1.2
-    home_games = past.loc[past.HomeTeam.eq(home)].tail(VENUE_GAMES)
-    away_games = past.loc[past.AwayTeam.eq(away)].tail(VENUE_GAMES)
+    home_games = past.loc[past.HomeTeam.eq(home)]
+    away_games = past.loc[past.AwayTeam.eq(away)]
     h_attack = smooth_mean(home_games.FTHG, lg_home)
     h_concede = smooth_mean(home_games.FTAG, lg_away)
     a_attack = smooth_mean(away_games.FTAG, lg_away)
@@ -251,7 +289,7 @@ def prediction_for_match(
     if home == away:
         raise ValueError("Choose two different teams.")
     cutoff = matches.Date.max() + pd.Timedelta(days=1)
-    past = matches.loc[matches.Date.ge(cutoff - pd.Timedelta(days=HISTORY_DAYS))]
+    past = last_two_seasons(matches.loc[matches.Date.lt(cutoff)])
     a_goals, ratings = attack_defence_rating(past, home, away)
     a_grid = poisson_grid(*a_goals)
     grids = {"Attack × Defence": a_grid}
@@ -287,7 +325,7 @@ def results_for_prediction(prediction: Predictions) -> pd.DataFrame:
 
 def club_ratings(matches: pd.DataFrame, clubs: list[str]):
     cutoff = matches.Date.max() + pd.Timedelta(days=1)
-    past = matches.loc[matches.Date.ge(cutoff - pd.Timedelta(days=HISTORY_DAYS))]
+    past = last_two_seasons(matches.loc[matches.Date.lt(cutoff)])
     rows = []
     for team in clubs:
         _, r = attack_defence_rating(past, team, team)
@@ -309,31 +347,43 @@ def latest_clubs(matches: pd.DataFrame):
 
 
 def model_training_data(prepared: pd.DataFrame):
-    # Same as Lesson 10: fit the regression through completed 2025–26,
-    # never using current partial 2026–27 results to fit coefficients.
-    return prepared.loc[prepared.SeasonCode.isin(SEASONS[:-1])].copy()
+    """Train the recent-goals-and-shots comparator on the latest two seasons.
+
+    Includes completed current-season matches when present. For any upcoming
+    kickoff, the caller must provide only results available before that match.
+    """
+    return last_two_seasons(prepared)
 
 
 def historical_brier(matches: pd.DataFrame, prepared: pd.DataFrame) -> pd.DataFrame:
-    """Recompute Lesson 10 benchmarks on identical same-season test fixtures.
+    """Retrospective evaluation with two-season model windows.
 
-    Does not use these familiar seasons as a new independent test.
+    Each score uses past match days only. The goals-and-shots regression is
+    trained on the TWO complete seasons preceding the test season, instead of
+    fitting to all historical matches. The test season remains entirely out of
+    regression training. Results are exploratory: earlier seasons have already
+    been consulted while developing this project.
     """
-    if not {"2425", "2526"}.issubset(set(matches.SeasonCode)):
+    test_seasons = ("2425", "2526")
+    if not set(test_seasons).issubset(set(matches.SeasonCode)):
         raise ValueError("Need both 2024–25 and 2025–26 to run the historical benchmark.")
     by_date = []
     for date, day in matches.groupby("Date", sort=True):
-        past = matches.loc[(matches.Date < date) & (matches.Date >= date - pd.Timedelta(days=HISTORY_DAYS))]
+        past = last_two_seasons(matches.loc[matches.Date.lt(date)])
         for m in day.itertuples(index=False):
             by_date.append(attack_defence_rating(past, m.HomeTeam, m.AwayTeam)[0])
     attack = np.asarray(by_date)
     if len(attack) != len(prepared):
         raise ValueError("Fixture/feature alignment error.")
     rows = []
-    for code in ("2425", "2526"):
+    all_codes = sorted(set(matches.SeasonCode), key=lambda c: (int(str(c)[:2]),str(c)))
+    for code in test_seasons:
         test = prepared.loc[prepared.SeasonCode.eq(code)]
-        before = SEASONS[:SEASONS.index(code)]
-        train = prepared.loc[prepared.SeasonCode.isin(before)]
+        pos = all_codes.index(code)
+        prior_two = all_codes[max(0,pos-SEASON_WINDOW):pos]
+        train = prepared.loc[prepared.SeasonCode.isin(prior_two)]
+        if len(train) < 100:
+            raise ValueError(f"At least 100 prior results needed to test {season_label(code)}.")
         shot = fit_shots_model(train)
         a_goals = attack[test.index.to_numpy()]
         b_goals = predict_shots(shot, test)
